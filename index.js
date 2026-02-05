@@ -17,12 +17,12 @@ const users = {};
 
 // --- SUPER USER CONFIG ---
 const ADMIN_ID = "admin";
-const ADMIN_PASSWORD = "super-secret-password"; // <--- CHANGE THIS
+const ADMIN_PASSWORD = "super-secret-password"; // <--- CHANGE THIS IF YOU WANT
 
 io.on("connection", (socket) => {
   console.log(`User Connected: ${socket.id}`);
 
-  // 1. REGISTER / LOGIN
+  // 1. LOGIN / REGISTER
   socket.on("auth-user", ({ familyId, password }, callback) => {
       // A. ADMIN LOGIN
       if (familyId === ADMIN_ID) {
@@ -39,7 +39,7 @@ io.on("connection", (socket) => {
       const user = users[familyId];
 
       if (user) {
-          // USER EXISTS: Try to Login
+          // USER EXISTS: Check Password
           if (user.password === password) {
               if (user.blocked) {
                   callback({ success: false, message: "This ID has been BLOCKED by Admin." });
@@ -57,7 +57,7 @@ io.on("connection", (socket) => {
           console.log(`New User Registered: ${familyId}`);
           callback({ success: true, isAdmin: false });
           
-          // Notify Admin (Real-time update)
+          // Notify Admin
           io.to("admin-room").emit("admin-update", users);
       }
   });
@@ -76,13 +76,10 @@ io.on("connection", (socket) => {
   });
 
   // --- ADMIN COMMANDS ---
-
-  // 3. GET ALL USERS (Called when Admin logs in)
   socket.on("admin-get-list", () => {
       socket.emit("admin-update", users);
   });
 
-  // 4. ADMIN ACTION (Block/Delete)
   socket.on("admin-action", ({ targetId, action, adminPass }, callback) => {
       if (adminPass !== ADMIN_PASSWORD) return callback({ success: false, message: "Unauthorized" });
 
@@ -90,22 +87,25 @@ io.on("connection", (socket) => {
 
       if (action === "delete") {
           delete users[targetId];
-          io.in(targetId).disconnectSockets(); // Boot them offline
+          io.in(targetId).disconnectSockets();
           callback({ success: true });
       } else if (action === "block") {
-          users[targetId].blocked = !users[targetId].blocked; // Toggle Block
-          if (users[targetId].blocked) io.in(targetId).disconnectSockets(); // Boot immediate if blocking
+          users[targetId].blocked = !users[targetId].blocked; 
+          if (users[targetId].blocked) io.in(targetId).disconnectSockets();
           callback({ success: true });
       }
-      
-      // Refresh Admin List
       io.to("admin-room").emit("admin-update", users);
   });
 
-  // Standard App Features
+  // --- CORE FEATURES (Text, Audio, QR) ---
   socket.on("scan-qr", (data) => socket.to(data.qrId).emit("critical-alert", data));
   socket.on("send-chat", (data) => socket.to(data.qrId).emit("receive-chat", data));
   socket.on("send-audio", (data) => socket.to(data.qrId).emit("receive-audio", data.audioBase64));
+  
+  // Re-join logic for page refreshes
+  socket.on("join-family", (familyId) => {
+     socket.join(familyId);
+  });
 });
 
 server.listen(3001, () => console.log("SERVER RUNNING"));

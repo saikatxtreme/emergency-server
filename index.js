@@ -2,10 +2,15 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const axios = require("axios"); // <--- NEW: For sending Push
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
+
+// --- 1. HEALTH CHECK ROUTE (Keeps server awake & verifiable) ---
+app.get("/", (req, res) => {
+  res.send("✅ EMERGO SERVER IS RUNNING. Status: Online.");
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -15,95 +20,113 @@ const io = new Server(server, {
 // STRUCTURE: { "family-id": { password: "123", blocked: false, pushToken: "ExponentPushToken[...]" } }
 const users = {}; 
 
+// --- ADMIN CREDENTIALS ---
 const ADMIN_ID = "admin";
-const ADMIN_PASSWORD = "super-secret-password";
+const ADMIN_PASSWORD = "super-secret-password"; 
 
 io.on("connection", (socket) => {
   console.log(`User Connected: ${socket.id}`);
 
-  // 1. LOGIN / REGISTER (Now saves Push Token)
+  // 2. AUTHENTICATION HANDLER
   socket.on("auth-user", ({ familyId, password, pushToken }, callback) => {
-      // ADMIN
+      // A. ADMIN LOGIN
       if (familyId === ADMIN_ID) {
           if (password === ADMIN_PASSWORD) {
               socket.join("admin-room");
               callback({ success: true, isAdmin: true });
-          } else { callback({ success: false, message: "Wrong Admin Password" }); }
+          } else {
+              callback({ success: false, message: "Invalid Admin Password" });
+          }
           return;
       }
 
+      // B. REGULAR USER LOGIN
       const user = users[familyId];
 
       if (user) {
-          // EXISTING USER
+          // Check Password
           if (user.password === password) {
               if (user.blocked) {
-                  callback({ success: false, message: "BLOCKED." });
-              } else {
-                  // UPDATE TOKEN (In case they logged in from a new phone)
-                  user.pushToken = pushToken;
-                  socket.join(familyId);
-                  callback({ success: true, isAdmin: false });
+                  return callback({ success: false, message: "Account Blocked by Admin." });
               }
-          } else { callback({ success: false, message: "Wrong Password." }); }
+              // Update Push Token (User might have a new phone)
+              user.pushToken = pushToken; 
+              socket.join(familyId);
+              callback({ success: true, isAdmin: false });
+          } else {
+              callback({ success: false, message: "Incorrect Password." });
+          }
       } else {
-          // NEW USER
+          // C. NEW USER REGISTRATION
           users[familyId] = { password, blocked: false, pushToken };
           socket.join(familyId);
-          console.log(`Registered: ${familyId}`);
+          console.log(`New Family Registered: ${familyId}`);
           callback({ success: true, isAdmin: false });
+          
+          // Update Admin Dashboard in real-time
           io.to("admin-room").emit("admin-update", users);
       }
   });
 
-  // 2. TRIGGER ALERT (Called by Web Client)
+  // 3. EMERGENCY ALERT (Web -> Mobile)
   socket.on("trigger-alert", async (qrId) => {
       const user = users[qrId];
       if (user && user.pushToken) {
-          console.log(`Sending Push to ${qrId}...`);
-          
-          // Send to Expo API
+          console.log(`🚨 ALERT SENT TO: ${qrId}`);
           try {
               await axios.post('https://exp.host/--/api/v2/push/send', {
                   to: user.pushToken,
                   sound: 'default',
                   title: "🚨 EMERGENCY ALERT",
-                  body: "Someone is at your vehicle! Tap to open.",
-                  data: { someData: 'goes here' },
+                  body: "Someone is at your vehicle! Action Required.",
                   priority: 'high',
-                  channelId: 'emergency-alert', // For Android High Priority
+                  channelId: 'emergency-alert', 
               });
           } catch (error) {
-              console.error("Push Error", error);
+              console.error("Push Notification Failed:", error);
           }
       }
   });
 
-  // Standard Listeners
-  socket.on("delete-self", ({ familyId, password }, callback) => {
-      const user = users[familyId];
-      if (user && user.password === password) {
-          delete users[familyId];
-          io.in(familyId).disconnectSockets();
-          callback({ success: true });
-          io.to("admin-room").emit("admin-update", users);
-      } else callback({ success: false });
-  });
-
+  // 4. ADMIN ACTIONS
   socket.on("admin-get-list", () => socket.emit("admin-update", users));
+  
   socket.on("admin-action", ({ targetId, action, adminPass }, callback) => {
-      if (adminPass !== ADMIN_PASSWORD) return callback({ success: false });
-      if (!users[targetId]) return callback({ success: false });
-      if (action === "delete") delete users[targetId];
-      else if (action === "block") users[targetId].blocked = !users[targetId].blocked;
+      if (adminPass !== ADMIN_PASSWORD) return callback({ success: false, message: "Unauthorized" });
+      
+      if (!users[targetId]) return callback({ success: false, message: "User not found" });
+
+      if (action === "delete") {
+          delete users[targetId];
+          io.in(targetId).disconnectSockets(); // Force logout
+      } else if (action === "block") {
+          users[targetId].blocked = !users[targetId].blocked;
+          if (users[targetId].blocked) io.in(targetId).disconnectSockets();
+      }
+      
       io.to("admin-room").emit("admin-update", users);
       callback({ success: true });
   });
 
+  // 5. USER SELF-DELETE
+  socket.on("delete-self", ({ familyId, password }, callback) => {
+      if (users[familyId] && users[familyId].password === password) {
+          delete users[familyId];
+          io.in(familyId).disconnectSockets();
+          io.to("admin-room").emit("admin-update", users);
+          callback({ success: true });
+      } else {
+          callback({ success: false, message: "Invalid Credentials" });
+      }
+  });
+
+  // 6. CORE FEATURES
   socket.on("scan-qr", (data) => socket.to(data.qrId).emit("critical-alert", data));
   socket.on("send-chat", (data) => socket.to(data.qrId).emit("receive-chat", data));
   socket.on("send-audio", (data) => socket.to(data.qrId).emit("receive-audio", data.audioBase64));
+  
+  // Re-join room on page refresh
   socket.on("join-family", (id) => socket.join(id));
 });
 
-server.listen(3001, () => console.log("SERVER RUNNING"));
+server.listen(3001, () => console.log("SERVER RUNNING ON PORT 3001"));
